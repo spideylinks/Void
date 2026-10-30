@@ -1,6 +1,12 @@
 """
-Void MCU Streaming Bridge v3.2 (Safe Startup & Peer Resolution)
+Void MCU Streaming Bridge v3.0
 Telegram -> HTTP Range streaming (FastAPI + Pyrogram)
+
+Run:
+    pip install fastapi "uvicorn[standard]" pyrogram tgcrypto
+    uvicorn stream_server:app --host 0.0.0.0 --port 8000
+
+NOTE: Run with a SINGLE worker (one Pyrogram session per process).
 """
 
 import asyncio
@@ -44,9 +50,9 @@ class Settings:
     api_hash: str
     bot_token: str
     chat_id: int
-    stream_token: str
+    stream_token: str          # empty = auth disabled
     max_streams: int
-    cache_ttl: int
+    cache_ttl: int             # seconds
     cache_size: int
     allowed_origins: list
 
@@ -94,7 +100,7 @@ STARTED_AT = time.time()
 
 
 # --------------------------------------------------------------------------- #
-# Media metadata cache (TTL + LRU)
+# Media metadata cache (TTL + LRU) - avoids a Telegram API call per Range request
 # --------------------------------------------------------------------------- #
 @dataclass
 class MediaInfo:
@@ -140,17 +146,9 @@ cache = TTLCache(settings.cache_ttl, settings.cache_size)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     logger.info("Starting Telegram client...")
-    await bot.start()
+    await bot.start()  # fail fast: if this raises, the deploy crashes visibly
     me = await bot.get_me()
     logger.info("Connected as @%s (ID: %s) | chat_id=%s", me.username, me.id, settings.chat_id)
-    
-    # Safe pre-warm: won't crash deployment if bot isn't in group yet
-    try:
-        chat = await bot.get_chat(settings.chat_id)
-        logger.info("Successfully resolved & cached chat: %s (Type: %s)", getattr(chat, "title", "Private"), chat.type)
-    except Exception as e:
-        logger.warning("WARNING: Could not pre-resolve chat %s. Make sure bot is added as admin in the group! Error: %s", settings.chat_id, e)
-
     try:
         yield
     finally:
@@ -158,7 +156,7 @@ async def lifespan(_: FastAPI):
         await bot.stop()
 
 
-app = FastAPI(title="Void MCU Streaming Bridge", version="3.2", lifespan=lifespan)
+app = FastAPI(title="Void MCU Streaming Bridge", version="3.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -236,11 +234,13 @@ _RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 
 def parse_range(header: str, size: int) -> tuple:
+    """Returns (start, end) inclusive. Raises 416 on invalid ranges."""
     unsatisfiable = HTTPException(
         status_code=416,
         detail="Requested range not satisfiable",
         headers={"Content-Range": f"bytes */{size}"},
     )
+    # Only the first range is honoured (multi-range is rarely used by players)
     m = _RANGE_RE.match(header.strip().split(",")[0])
     if not m:
         raise unsatisfiable
@@ -248,7 +248,7 @@ def parse_range(header: str, size: int) -> tuple:
 
     if s == "" and e == "":
         raise unsatisfiable
-    if s == "":
+    if s == "":                      # suffix range: last N bytes
         n = int(e)
         if n == 0:
             raise unsatisfiable
@@ -263,6 +263,10 @@ def parse_range(header: str, size: int) -> tuple:
 
 
 async def iter_byte_range(message, start: int, end: int) -> AsyncIterator[bytes]:
+    """
+    Pyrogram's stream_media uses CHUNK units (1 MiB) for offset/limit, not bytes.
+    We fetch whole chunks covering [start, end] and trim the edges ourselves.
+    """
     first_chunk = start // TG_CHUNK
     last_chunk = end // TG_CHUNK
     skip = start - first_chunk * TG_CHUNK
@@ -315,9 +319,11 @@ async def stream_video(
 
     info = await resolve_media(message_id)
 
+    # ---- Conditional request (cache validation) ---- #
     if request.headers.get("if-none-match") == info.etag:
         return Response(status_code=304, headers={"ETag": info.etag})
 
+    # ---- Range handling ---- #
     range_header = request.headers.get("range")
     if range_header:
         start, end = parse_range(range_header, info.size)
@@ -340,6 +346,7 @@ async def stream_video(
     if request.method == "HEAD":
         return Response(status_code=status, headers=headers)
 
+    # ---- Concurrency guard ---- #
     if stream_slots.locked():
         raise HTTPException(
             status_code=503, detail="Server busy, try again shortly",
@@ -365,8 +372,9 @@ async def stream_video(
             logger.warning("FloodWait %ss during stream (msg %s)", fw.value, message_id)
             cache.invalidate(message_id)
         except Exception:
+            # Headers are already sent; all we can do is log and drop the connection.
             logger.exception("Stream failed (msg %s) after %d/%d bytes", message_id, sent, length)
-            cache.invalidate(message_id)
+            cache.invalidate(message_id)  # file_reference may have expired
         finally:
             active_streams -= 1
             stream_slots.release()
@@ -377,5 +385,6 @@ async def stream_video(
 
 @app.exception_handler(Exception)
 async def unhandled(_: Request, exc: Exception):
+    # Log full details server-side, never leak internals to the client.
     logger.exception("Unhandled error: %s", exc)
     return JSONResponse({"detail": "Internal server error"}, status_code=500)
