@@ -1,12 +1,6 @@
 """
-Void MCU Streaming Bridge v3.1 (Fixed Peer Resolution)
+Void MCU Streaming Bridge v3.2 (Safe Startup & Peer Resolution)
 Telegram -> HTTP Range streaming (FastAPI + Pyrogram)
-
-Run:
-    pip install fastapi "uvicorn[standard]" pyrogram tgcrypto
-    uvicorn main:app --host 0.0.0.0 --port 10000
-
-NOTE: Run with a SINGLE worker (one Pyrogram session per process).
 """
 
 import asyncio
@@ -50,9 +44,9 @@ class Settings:
     api_hash: str
     bot_token: str
     chat_id: int
-    stream_token: str          # empty = auth disabled
+    stream_token: str
     max_streams: int
-    cache_ttl: int             # seconds
+    cache_ttl: int
     cache_size: int
     allowed_origins: list
 
@@ -100,7 +94,7 @@ STARTED_AT = time.time()
 
 
 # --------------------------------------------------------------------------- #
-# Media metadata cache (TTL + LRU) - avoids a Telegram API call per Range request
+# Media metadata cache (TTL + LRU)
 # --------------------------------------------------------------------------- #
 @dataclass
 class MediaInfo:
@@ -146,17 +140,16 @@ cache = TTLCache(settings.cache_ttl, settings.cache_size)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     logger.info("Starting Telegram client...")
-    await bot.start()  # fail fast: if this raises, the deploy crashes visibly
+    await bot.start()
     me = await bot.get_me()
     logger.info("Connected as @%s (ID: %s) | chat_id=%s", me.username, me.id, settings.chat_id)
     
-    # FIX: Pre-warm chat peer info to prevent "Peer id invalid" ValueError
+    # Safe pre-warm: won't crash deployment if bot isn't in group yet
     try:
         chat = await bot.get_chat(settings.chat_id)
         logger.info("Successfully resolved & cached chat: %s (Type: %s)", getattr(chat, "title", "Private"), chat.type)
     except Exception as e:
-        logger.error("CRITICAL: Failed to resolve CHAT_ID %s. Ensure bot is added as admin in the group! Error: %s", settings.chat_id, e)
-        raise
+        logger.warning("WARNING: Could not pre-resolve chat %s. Make sure bot is added as admin in the group! Error: %s", settings.chat_id, e)
 
     try:
         yield
@@ -165,7 +158,7 @@ async def lifespan(_: FastAPI):
         await bot.stop()
 
 
-app = FastAPI(title="Void MCU Streaming Bridge", version="3.1", lifespan=lifespan)
+app = FastAPI(title="Void MCU Streaming Bridge", version="3.2", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -243,7 +236,6 @@ _RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 
 def parse_range(header: str, size: int) -> tuple:
-    """Returns (start, end) inclusive. Raises 416 on invalid ranges."""
     unsatisfiable = HTTPException(
         status_code=416,
         detail="Requested range not satisfiable",
