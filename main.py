@@ -1,5 +1,5 @@
 """
-Void MCU Streaming Bridge v4.0
+Void MCU Streaming Bridge v4.1
 Telegram -> HTTP Range streaming (FastAPI + Kurigram/Pyrogram)
 
 requirements.txt:
@@ -22,6 +22,18 @@ Environment variables
                STALL_TIMEOUT       seconds without data before abort   (default 60)
                WARMUP_MESSAGE_ID   media message used for warm-up      (default: auto)
                CACHE_TTL / CACHE_SIZE / ALLOWED_ORIGINS / LOG_LEVEL
+
+What changed in v4.1
+    * ROOT-CAUSE FIX: Pyrogram/Kurigram allows only ONE download generator at a
+      time by default (max_concurrent_transmissions=1) and holds that slot for
+      the whole life of the generator. A second request (seek, retry, another
+      file) therefore waited with 0 bytes until the first stream ended, which
+      ended in "No data from Telegram for 60s". The Client now gets
+      max_concurrent_transmissions = MAX_STREAMS + 2.
+    * Producer task checks the stop flag while the queue is full, so a stream
+      the player abandoned frees its Telegram slot within ~1s (not after one
+      more GetFile). The end marker can no longer be lost when the queue is full.
+    * /health now really pings Telegram (get_me, 5s) and returns 503 if dead.
 
 What changed in v4.0
     * Telegram download runs in its own task and is never cancelled when a
@@ -136,6 +148,9 @@ bot = Client(
     api_hash=settings.api_hash,
     bot_token=settings.bot_token,
     in_memory=True,
+    # Default is 1: every open stream would block all others. Each stream holds
+    # one slot for its whole life, so this must be >= MAX_STREAMS (+2 headroom).
+    max_concurrent_transmissions=settings.max_streams + 2,
 )
 
 active_streams = 0
@@ -296,7 +311,7 @@ async def lifespan(_: FastAPI):
         await bot.stop()
 
 
-app = FastAPI(title="Void MCU Streaming Bridge", version="4.0", lifespan=lifespan)
+app = FastAPI(title="Void MCU Streaming Bridge", version="4.1", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -482,7 +497,20 @@ async def iter_byte_range(message, start: int, end: int) -> AsyncIterator[bytes]
     stop = asyncio.Event()
     failure: list = []
 
+    async def put_or_stop(item) -> bool:
+        """Put into the queue, but give up as soon as the client is gone.
+        Returns False if we gave up."""
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(queue.put(item), timeout=1)
+                return True
+            except asyncio.TimeoutError:
+                continue
+        return False
+
     async def producer() -> None:
+        if stop.is_set():
+            return
         agen = bot.stream_media(
             message, limit=last_chunk - first_chunk + 1, offset=first_chunk
         )
@@ -490,17 +518,24 @@ async def iter_byte_range(message, start: int, end: int) -> AsyncIterator[bytes]
             async for chunk in agen:
                 if stop.is_set():
                     break
-                await queue.put(chunk)
+                if not await put_or_stop(chunk):
+                    break
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             failure.append(exc)
         finally:
+            # Closing the generator releases Pyrogram's download slot.
             try:
                 await agen.aclose()
             except Exception:
                 pass
-            await queue.put(_END)
+            # Tell the consumer we are done (unless nobody is listening anymore).
+            if not stop.is_set():
+                try:
+                    await put_or_stop(_END)
+                except asyncio.CancelledError:
+                    pass
 
     spawn(producer())
 
@@ -577,19 +612,36 @@ async def root():
     return {"status": "Void MCU Streamer Bridge is Active", "version": app.version}
 
 
+_health_at = 0.0
+_health_ok = False
+
+
 @app.get("/health")
 async def health():
     connected = bool(bot.is_connected)
+    telegram_ok = False
+    if connected:
+        global _health_at, _health_ok
+        if time.monotonic() - _health_at < 10:   # do not hit Telegram on every ping
+            telegram_ok = _health_ok
+        else:
+            try:
+                await asyncio.wait_for(bot.get_me(), timeout=5)
+                telegram_ok = True
+            except Exception as exc:
+                logger.warning("Health: Telegram ping failed: %s", exc.__class__.__name__)
+            _health_at, _health_ok = time.monotonic(), telegram_ok
     sessions = getattr(bot, "media_sessions", None)
     body = {
-        "status": "ok" if connected else "degraded",
+        "status": "ok" if (connected and telegram_ok) else "degraded",
         "telegram_connected": connected,
+        "telegram_ok": telegram_ok,
         "media_sessions": len(sessions) if isinstance(sessions, dict) else None,
         "active_streams": active_streams,
         "max_streams": settings.max_streams,
         "uptime_sec": int(time.time() - STARTED_AT),
     }
-    return JSONResponse(body, status_code=200 if connected else 503)
+    return JSONResponse(body, status_code=200 if (connected and telegram_ok) else 503)
 
 
 @app.get("/info")
