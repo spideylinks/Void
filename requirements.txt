@@ -1,5 +1,5 @@
 fastapi
 uvicorn
-pyrogram
+kurigram
 tgcrypto
 aiofiles
