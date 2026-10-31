@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Void Stream Tester</title>
+<style>
+  :root {
+    --bg: #0e1013;
+    --panel: #171a1f;
+    --line: #272c33;
+    --fg: #e7eaee;
+    --muted: #8b939e;
+    --accent: #e5484d;
+    --ok: #3dd68c;
+    --warn: #f5b942;
+    --bad: #ff6369;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.5 var(--sans);
+    padding-block: 24px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+  main { max-width: 760px; margin: 0 auto; display: grid; gap: 16px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin: 2px 0 0; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  label { display: block; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+  input {
+    width: 100%; min-width: 0; background: var(--bg); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+    font: 15px var(--mono);
+  }
+  input:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+  .row > div { flex: 1 1 140px; min-width: 0; }
+  .row > div.grow { flex: 3 1 240px; }
+  button {
+    font: 600 15px var(--sans); border: 0; border-radius: 8px; padding: 11px 20px;
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button.ghost { background: transparent; color: var(--fg); border: 1px solid var(--line); }
+  button:disabled { opacity: .55; cursor: wait; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .chip {
+    font: 13px var(--mono); padding: 4px 10px; border-radius: 999px;
+    background: transparent; color: var(--fg); border: 1px solid var(--line);
+  }
+  .chip:hover { border-color: var(--accent); }
+  .stage { background: #000; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); }
+  video { display: block; width: 100%; max-height: 70vh; background: #000; }
+  .pill {
+    display: inline-block; font: 600 12px var(--mono); padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted);
+  }
+  .pill.ok { color: var(--ok); border-color: var(--ok); }
+  .pill.warn { color: var(--warn); border-color: var(--warn); }
+  .pill.bad { color: var(--bad); border-color: var(--bad); }
+  .head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .head strong { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; font: 13px var(--mono); }
+  dt { color: var(--muted); }
+  dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  .note { margin-top: 10px; font-size: 13px; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .note.bad { color: var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Void Stream Tester</h1>
+    <p class="sub">Telegram message ID daalo, server se video stream hogi aur response ka status dikhega.</p>
+  </header>
+
+  <form class="panel" id="form" autocomplete="off">
+    <div class="row">
+      <div class="grow">
+        <label for="server">Server URL</label>
+        <input id="server" type="url" value="https://void-98it.onrender.com" spellcheck="false">
+      </div>
+      <div>
+        <label for="mid">Message ID</label>
+        <input id="mid" type="number" inputmode="numeric" min="1" value="36">
+      </div>
+    </div>
+    <div class="actions">
+      <button type="submit" id="go">Play</button>
+      <button type="button" class="ghost" id="raw">Open raw link</button>
+    </div>
+    <div class="chips" id="chips" aria-label="Recent message IDs"></div>
+  </form>
+
+  <section class="stage"><video id="vid" controls playsinline preload="metadata"></video></section>
+
+  <section class="panel" aria-live="polite">
+    <div class="head"><strong>Response check</strong><span class="pill" id="pill">idle</span></div>
+    <dl id="info">
+      <dt>Request</dt><dd id="i-url">-</dd>
+      <dt>Status</dt><dd id="i-status">-</dd>
+      <dt>Content-Type</dt><dd id="i-type">-</dd>
+      <dt>Accept-Ranges</dt><dd id="i-ranges">-</dd>
+      <dt>Content-Range</dt><dd id="i-crange">-</dd>
+      <dt>Response time</dt><dd id="i-time">-</dd>
+      <dt>Video</dt><dd id="i-video">-</dd>
+    </dl>
+    <div class="note" id="note"></div>
+  </section>
+</main>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var vid = $('vid');
+
+  function load(key, fallback) {
+    try { var v = localStorage.getItem(key); return v === null ? fallback : v; } catch (e) { return fallback; }
+  }
+  function save(key, val) { try { localStorage.setItem(key, val); } catch (e) {} }
+
+  $('server').value = load('void.server', $('server').value);
+  $('mid').value = load('void.last', $('mid').value);
+
+  var recent = [];
+  try { recent = JSON.parse(load('void.recent', '[]')); } catch (e) { recent = []; }
+
+  function renderChips() {
+    var box = $('chips');
+    box.innerHTML = '';
+    recent.forEach(function (id) {
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'chip'; b.textContent = '#' + id;
+      b.onclick = function () { $('mid').value = id; run(); };
+      box.appendChild(b);
+    });
+  }
+  function remember(id) {
+    recent = [id].concat(recent.filter(function (x) { return x !== id; })).slice(0, 8);
+    save('void.recent', JSON.stringify(recent));
+    save('void.last', String(id));
+    renderChips();
+  }
+
+  function setPill(text, cls) { var p = $('pill'); p.textContent = text; p.className = 'pill ' + (cls || ''); }
+  function setNote(text, bad) { var n = $('note'); n.textContent = text || ''; n.className = 'note' + (bad ? ' bad' : ''); }
+
+  function streamUrl() {
+    var base = $('server').value.trim().replace(/\/+$/, '');
+    var id = parseInt($('mid').value, 10);
+    return { base: base, id: id, url: base + '/stream?message_id=' + id };
+  }
+
+  var MEDIA_ERR = {
+    1: 'Load beech me rok diya gaya',
+    2: 'Network error',
+    3: 'Video decode nahi hui (format support nahi)',
+    4: 'Source support nahi hua ya server ne error diya'
+  };
+
+  vid.addEventListener('loadedmetadata', function () {
+    var d = isFinite(vid.duration) ? Math.round(vid.duration) + ' s' : 'live';
+    $('i-video').textContent = 'metadata ok, ' + vid.videoWidth + 'x' + vid.videoHeight + ', ' + d;
+  });
+  vid.addEventListener('playing', function () { $('i-video').textContent = 'playing at ' + vid.currentTime.toFixed(1) + ' s'; });
+  vid.addEventListener('waiting', function () { $('i-video').textContent = 'buffering...'; });
+  vid.addEventListener('seeked', function () { $('i-video').textContent = 'seek ok, ab ' + vid.currentTime.toFixed(1) + ' s par'; });
+  vid.addEventListener('error', function () {
+    var c = vid.error ? vid.error.code : 0;
+    $('i-video').textContent = 'error ' + c;
+    setPill('video error', 'bad');
+    setNote((MEDIA_ERR[c] || 'Unknown error') + '\nRender logs me /stream ki request check karo.', true);
+  });
+
+  async function run() {
+    var s = streamUrl();
+    if (!s.base || !s.id || s.id < 1) { setPill('invalid', 'bad'); setNote('Server URL aur sahi message ID daalo.', true); return; }
+    save('void.server', s.base);
+
+    var go = $('go');
+    go.disabled = true;
+    vid.pause(); vid.removeAttribute('src'); vid.load();
+    ['i-status', 'i-type', 'i-ranges', 'i-crange', 'i-time', 'i-video'].forEach(function (k) { $(k).textContent = '-'; });
+    $('i-url').textContent = s.url;
+    setPill('checking', 'warn');
+    setNote('Server check ho raha hai. Render free tier sleep se jaagne me 30-60 sec le sakta hai.');
+
+    var t0 = performance.now();
+    var ok = false;
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, 90000);
+    try {
+      var r = await fetch(s.url, { headers: { Range: 'bytes=0-1' }, signal: ctrl.signal });
+      clearTimeout(timer);
+      $('i-time').textContent = Math.round(performance.now() - t0) + ' ms';
+      $('i-status').textContent = r.status + ' ' + (r.statusText || '');
+      $('i-type').textContent = r.headers.get('content-type') || '(hidden or missing)';
+      $('i-ranges').textContent = r.headers.get('accept-ranges') || '(hidden or missing)';
+      $('i-crange').textContent = r.headers.get('content-range') || '(hidden or missing)';
+      if (r.status === 200 || r.status === 206) {
+        ok = true;
+        setPill('server ok ' + r.status, 'ok');
+        setNote(r.status === 206 ? 'Range request chal rahi hai, seeking kaam karni chahiye.' : 'Server ne poori file (200) bheji. Seeking ke liye 206 hona behtar hai.');
+        if (r.status === 206) {
+          try { await r.arrayBuffer(); } catch (e) {}
+        } else {
+          try { r.body && r.body.cancel(); } catch (e) {}
+        }
+      } else {
+        var body = '';
+        try { body = (await r.text()).slice(0, 600); } catch (e) {}
+        setPill('error ' + r.status, 'bad');
+        setNote(body || 'Server ne error diya. Render logs dekho.', true);
+      }
+    } catch (e) {
+      clearTimeout(timer);
+      $('i-time').textContent = Math.round(performance.now() - t0) + ' ms';
+      $('i-status').textContent = e.name === 'AbortError' ? 'timeout (90 s)' : 'blocked ya network error';
+      setPill('no check', 'warn');
+      setNote('Status check browser ne roka (CORS ya network). Video seedha load karke dekh rahe hain.');
+      ok = e.name !== 'AbortError';
+    }
+
+    if (ok) {
+      remember(s.id);
+      $('i-video').textContent = 'loading...';
+      vid.src = s.url;
+      vid.load();
+      vid.play().catch(function () {});
+    }
+    go.disabled = false;
+  }
+
+  $('form').addEventListener('submit', function (e) { e.preventDefault(); run(); });
+  $('raw').addEventListener('click', function () {
+    var s = streamUrl();
+    if (s.id) window.open(s.url, '_blank', 'noopener');
+  });
+  renderChips();
+})();
+</script>
+</body>
+</html>
